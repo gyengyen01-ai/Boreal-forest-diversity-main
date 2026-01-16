@@ -1,0 +1,267 @@
+//--------------------------------------------Function----------------------------------------------
+// Use this function to add vegetation indices
+function addVariables(image) {
+   return image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])
+    // Add an NDVI band.
+    .addBands(image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI'))
+    // Add an NDWI band.
+    .addBands(image.normalizedDifference(['SR_B5', 'SR_B7']).rename('NDWI'))
+    // Add an mNDWI band.
+    .addBands(image.normalizedDifference(['SR_B3', 'SR_B6']).rename('mNDWI'))
+    // Add an RVI band.
+    .addBands(image.expression(
+      'NIR*RED / GREEN', {
+      'NIR': image.select('SR_B5'),
+      'RED': image.select('SR_B4'),
+      'GREEN': image.select('SR_B2'),
+    }).rename('CVI'))
+    // Add an BSI band.
+    .addBands(image.expression(
+      '((RED + SWIR) - (NIR + BLUE)) / ((RED + SWIR) + (NIR + BLUE))', {
+        'RED': image.select('SR_B4'), 
+        'BLUE': image.select('SR_B2'),
+        'NIR': image.select('SR_B5'),
+        'SWIR': image.select('SR_B6')}).rename('BSI'))
+    .addBands(image.expression(
+      '((NIR - RED) / (NIR + RED + 0.5)) *1.5', {
+        'RED': image.select('SR_B4'), 
+        'NIR': image.select('SR_B5')}).rename('SAVI'))
+    .float();
+}
+
+// Use this function to remove clouds in Landsat-8
+function maskl8clouds(image){
+  var DilatedCloudBitMask = 1 << 1;
+  var cirrusBitMask = 1 << 2;
+  var cloudBitMask = 1 << 3;
+  var cloudShadowBitMask = 1 << 4;
+  var sowBitmask = 1 << 5;
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(DilatedCloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0))
+      .and(qa.bitwiseAnd(cloudBitMask).eq(0))
+      .and(qa.bitwiseAnd(cloudShadowBitMask).eq(0))
+      .and(qa.bitwiseAnd(sowBitmask).eq(0));
+  return image.updateMask(mask).divide(10000).clip(roi)
+      .copyProperties(image, ["system:time_start"]);
+}
+var inBands = ["SR_B2","SR_B3","SR_B4","SR_B5","SR_B6","SR_B7","NDVI","NDWI","mNDWI","CVI","BSI","SAVI"];
+var inBands_for_STMs = ["SR_B2","SR_B3","SR_B4","SR_B5","SR_B6","SR_B7","BSI"];
+
+//-------------------------------------------------HMs_VIs-----------------------------------------------------------
+// var dataset = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+//                   .filterDate('2020-05-01', '2020-11-01')
+//                   .filterBounds(roi)
+//                   .map(maskl8clouds)
+//                   .map(addVariables);
+// var band_median = dataset.select(inBands).median();
+// print (band_median);
+
+// // Get the NDVI band.
+// var VIs = band_median.select('NDVI','NDWI','mNDWI','CVI','BSI','SAVI').unitScale(-1, 1).multiply(255).toByte();
+
+// // Define a neighborhood with a kernel.
+// var square = ee.Kernel.square({radius: 3});
+// // Compute entropy
+// var NDVI_entropy = VIs.select('NDVI').entropy(square).rename("NDVI_entropy");
+// var NDWI_entropy = VIs.select('NDWI').entropy(square).rename("NDWI_entropy");
+// var mNDWI_entropy = VIs.select('mNDWI').entropy(square).rename("mNDWI_entropy");
+// var CVI_entropy = VIs.select('CVI').entropy(square).rename("CVI_entropy");
+// var BSI_entropy = VIs.select('BSI').entropy(square).rename("BSI_entropy");
+// var SAVI_entropy = VIs.select('SAVI').entropy(square).rename("SAVI_entropy");
+// //print(SAVI_entropy)
+
+// // Compute the gray-level co-occurrence matrix (GLCM)
+// var glcm = VIs.glcmTexture({size: 4});
+
+// var NDVI_CV = glcm.select('NDVI_var').rename("NDVI_CV");
+// var NDWI_CV = glcm.select('NDWI_var').rename("NDWI_CV");
+// var mNDWI_CV = glcm.select('mNDWI_var').rename("mNDWI_CV");
+// var CVI_CV = glcm.select('CVI_var').rename("CVI_CV");
+// var BSI_CV = glcm.select('BSI_var').rename("BSI_CV");
+// var SAVI_CV = glcm.select('SAVI_var').rename("SAVI_CV");
+
+// var NDVI_diss = glcm.select('NDVI_diss').rename("NDVI_diss");
+// var NDWI_diss = glcm.select('NDWI_diss').rename("NDWI_diss");
+// var mNDWI_diss = glcm.select('mNDWI_diss').rename("mNDWI_diss");
+// var CVI_diss = glcm.select('CVI_diss').rename("CVI_diss");
+// var BSI_diss = glcm.select('BSI_diss').rename("BSI_diss");
+// var SAVI_diss = glcm.select('SAVI_diss').rename("SAVI_diss");
+
+// // Compute two Spectral angle mapper indices
+// var SD = band_median.spectralDilation("sam");
+// var NDVI_SD = SD.select('NDVI').rename("NDVI_SD");
+// var NDWI_SD = SD.select('NDWI').rename("NDWI_SD");
+// var mNDWI_SD = SD.select('mNDWI').rename("mNDWI_SD");
+// var CVI_SD = SD.select('CVI').rename("CVI_SD");
+// var BSI_SD = SD.select('BSI').rename("BSI_SD");
+// var SAVI_SD = SD.select('SAVI').rename("SAVI_SD");
+
+// var SE = band_median.spectralErosion("sam");
+// var NDVI_SE = SE.select('NDVI').rename("NDVI_SE");
+// var NDWI_SE = SE.select('NDWI').rename("NDWI_SE");
+// var mNDWI_SE = SE.select('mNDWI').rename("mNDWI_SE");
+// var CVI_SE = SE.select('CVI').rename("CVI_SE");
+// var BSI_SE = SE.select('BSI').rename("BSI_SE");
+// var SAVI_SE = SE.select('SAVI').rename("SAVI_SE");
+
+
+// var composite = band_median.addBands(NDVI_entropy).addBands(NDVI_CV).addBands(NDVI_diss).addBands(NDVI_SD).addBands(NDVI_SE)
+//                           .addBands(NDWI_entropy).addBands(NDWI_CV).addBands(NDWI_diss).addBands(NDWI_SD).addBands(NDWI_SE)
+//                           .addBands(mNDWI_entropy).addBands(mNDWI_CV).addBands(mNDWI_diss).addBands(mNDWI_SD).addBands(mNDWI_SE)
+//                           .addBands(CVI_entropy).addBands(CVI_CV).addBands(CVI_diss).addBands(CVI_SD).addBands(CVI_SE)
+//                           .addBands(BSI_entropy).addBands(BSI_CV).addBands(BSI_diss).addBands(BSI_SD).addBands(BSI_SE)
+//                           .addBands(SAVI_entropy).addBands(SAVI_CV).addBands(SAVI_diss).addBands(SAVI_SD).addBands(SAVI_SE).clip(roi);
+// print(composite);
+
+// var VI_HMs = ["NDVI_entropy","NDVI_CV","NDVI_diss","NDVI_SD","NDVI_SE",
+//               "NDWI_entropy","NDWI_CV","NDWI_diss","NDWI_SD","NDWI_SE",
+//               "mNDWI_entropy","mNDWI_CV","mNDWI_diss","mNDWI_SD","mNDWI_SE",
+//               "CVI_entropy","CVI_CV","CVI_diss","CVI_SD","CVI_SE",
+//               "BSI_entropy","BSI_CV","BSI_diss","BSI_SD","BSI_SE",
+//               "SAVI_entropy","SAVI_CV","SAVI_diss","SAVI_SD","SAVI_SE"];
+
+
+// var bands = composite.select(VI_HMs).bandNames();
+// print("bands", bands);
+
+// var training = composite.select(bands).sampleRegions({
+//   collection: training,
+//   //properties: ['bindex_lts'],
+//   scale:50,
+//   geometries: true
+// });
+
+// // Transform coordinates into properties in the table.
+// var featColExport = training.map(function (feature) {
+//   // Get geometry
+//   var coordinates = feature.geometry()
+//                           // Transform it to the desired EPSG code. Here WGS 84
+//                           .transform('epsg:4326')
+//                           // Get coordinates as a list
+//                           .coordinates();
+//   // Get both entries of coordinates and set them as new properties
+//   var resul = feature.set('lon', coordinates.get(0), 
+//                     'lat', coordinates.get(1));
+//   // Remove geometry                   
+//   return resul.setGeometry(null);
+// });
+
+// Export.table.toDrive({
+//   collection: featColExport,
+//   folder: 'training_DL_22',
+//   fileNamePrefix:'Landsat_8_HMs_VI_G2',
+//   description:'Landsat_8_HMs_VI_G2',
+//   fileFormat: 'CSV'
+//   });
+
+//------------------------------------------------------HMs_Bands------------------------------------------------
+
+var dataset = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                  .filterDate('2020-05-01', '2020-11-01')
+                  .filterBounds(roi)
+                  .map(maskl8clouds)
+                  .map(addVariables);
+var band_median = dataset.select(inBands).median();
+print (band_median);
+
+// Get the NDVI band.
+var VIs = band_median.select('SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7').unitScale(-1, 1).multiply(255).toByte();
+
+// Define a neighborhood with a kernel.
+var square = ee.Kernel.square({radius: 3});
+// Compute entropy
+var SR_B2_entropy = VIs.select('SR_B2').entropy(square).rename("SR_B2_entropy");
+var SR_B3_entropy = VIs.select('SR_B3').entropy(square).rename("SR_B3_entropy");
+var SR_B4_entropy = VIs.select('SR_B4').entropy(square).rename("SR_B4_entropy");
+var SR_B5_entropy = VIs.select('SR_B5').entropy(square).rename("SR_B5_entropy");
+var SR_B6_entropy = VIs.select('SR_B6').entropy(square).rename("SR_B6_entropy");
+var SR_B7_entropy = VIs.select('SR_B7').entropy(square).rename("SR_B7_entropy");
+//print(SAVI_entropy)
+
+// Compute the gray-level co-occurrence matrix (GLCM)
+var glcm = VIs.glcmTexture({size: 4});
+
+var SR_B2_CV = glcm.select('SR_B2_var').rename("SR_B2_CV");
+var SR_B3_CV = glcm.select('SR_B3_var').rename("SR_B3_CV");
+var SR_B4_CV = glcm.select('SR_B4_var').rename("SR_B4_CV");
+var SR_B5_CV = glcm.select('SR_B5_var').rename("SR_B5_CV");
+var SR_B6_CV = glcm.select('SR_B6_var').rename("SR_B6_CV");
+var SR_B7_CV = glcm.select('SR_B7_var').rename("SR_B7_CV");
+
+var SR_B2_diss = glcm.select('SR_B2_diss').rename("SR_B2_diss");
+var SR_B3_diss = glcm.select('SR_B3_diss').rename("SR_B3_diss");
+var SR_B4_diss = glcm.select('SR_B4_diss').rename("SR_B4_diss");
+var SR_B5_diss = glcm.select('SR_B5_diss').rename("SR_B5_diss");
+var SR_B6_diss = glcm.select('SR_B6_diss').rename("SR_B6_diss");
+var SR_B7_diss = glcm.select('SR_B7_diss').rename("SR_B7_diss");
+
+// Compute two Spectral angle mapper indices
+var SD = band_median.spectralDilation("sam");
+var SR_B2_SD = SD.select('SR_B2').rename("SR_B2_SD");
+var SR_B3_SD = SD.select('SR_B3').rename("SR_B3_SD");
+var SR_B4_SD = SD.select('SR_B4').rename("SR_B4_SD");
+var SR_B5_SD = SD.select('SR_B5').rename("SR_B5_SD");
+var SR_B6_SD = SD.select('SR_B6').rename("SR_B6_SD");
+var SR_B7_SD = SD.select('SR_B7').rename("SR_B7_SD");
+
+var SE = band_median.spectralErosion("sam");
+var SR_B2_SE = SE.select('SR_B2').rename("SR_B2_SE");
+var SR_B3_SE = SE.select('SR_B3').rename("SR_B3_SE");
+var SR_B4_SE = SE.select('SR_B4').rename("SR_B4_SE");
+var SR_B5_SE = SE.select('SR_B5').rename("SR_B5_SE");
+var SR_B6_SE = SE.select('SR_B6').rename("SR_B6_SE");
+var SR_B7_SE = SE.select('SR_B7').rename("SR_B7_SE");
+
+
+var composite = band_median.addBands(SR_B2_entropy).addBands(SR_B2_CV).addBands(SR_B2_diss).addBands(SR_B2_SD).addBands(SR_B2_SE)
+                          .addBands(SR_B3_entropy).addBands(SR_B3_CV).addBands(SR_B3_diss).addBands(SR_B3_SD).addBands(SR_B3_SE)
+                          .addBands(SR_B4_entropy).addBands(SR_B4_CV).addBands(SR_B4_diss).addBands(SR_B4_SD).addBands(SR_B4_SE)
+                          .addBands(SR_B5_entropy).addBands(SR_B5_CV).addBands(SR_B5_diss).addBands(SR_B5_SD).addBands(SR_B5_SE)
+                          .addBands(SR_B6_entropy).addBands(SR_B6_CV).addBands(SR_B6_diss).addBands(SR_B6_SD).addBands(SR_B6_SE)
+                          .addBands(SR_B7_entropy).addBands(SR_B7_CV).addBands(SR_B7_diss).addBands(SR_B7_SD).addBands(SR_B7_SE).clip(roi);
+print(composite);
+
+var B_HMs = ["SR_B2_entropy","SR_B2_CV","SR_B2_diss","SR_B2_SD","SR_B2_SE",
+              "SR_B3_entropy","SR_B3_CV","SR_B3_diss","SR_B3_SD","SR_B3_SE",
+              "SR_B4_entropy","SR_B4_CV","SR_B4_diss","SR_B4_SD","SR_B4_SE",
+              "SR_B5_entropy","SR_B5_CV","SR_B5_diss","SR_B5_SD","SR_B5_SE",
+              "SR_B6_entropy","SR_B6_CV","SR_B6_diss","SR_B6_SD","SR_B6_SE",
+              "SR_B7_entropy","SR_B7_CV","SR_B7_diss","SR_B7_SD","SR_B7_SE"];
+
+
+var bands = composite.select(B_HMs).bandNames();
+print("bands", bands);
+
+var training = composite.select(bands).sampleRegions({
+  collection: training,
+  //properties: ['bindex_lts'],
+  scale: 50,
+  geometries: true
+});
+
+// Transform coordinates into properties in the table.
+var featColExport = training.map(function (feature) {
+  // Get geometry
+  var coordinates = feature.geometry()
+                          // Transform it to the desired EPSG code. Here WGS 84
+                          .transform('epsg:4326')
+                          // Get coordinates as a list
+                          .coordinates();
+  // Get both entries of coordinates and set them as new properties
+  var resul = feature.set('lon', coordinates.get(0), 
+                    'lat', coordinates.get(1));
+  // Remove geometry                   
+  return resul.setGeometry(null);
+});
+
+Export.table.toDrive({
+  collection: featColExport,
+  folder: 'training_DL_22',
+  fileNamePrefix:'Landsat_8_HMs_Band_G2',
+  description:'Landsat_8_HMs_Band_G2',
+  fileFormat: 'CSV'
+  });
+
+
+

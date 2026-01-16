@@ -1,0 +1,35 @@
+//1) ---------------------Training data---------------//
+//Creation of the "Diveristy_points" feature collection using the pixels having a feature property called "bindex_lts" 
+//To improve the information using a buffer with a fixed radius  ( radius = 10 m)
+
+var buffer = function(feature) {
+return feature.buffer(30)};
+OO_2020 = OO_2020.map(buffer)
+
+
+//2) ------ Define the superpixel seed location spacing, in pixels: (5 - 10 - 15 - 20)//
+var size_segmentation = 15
+// Segmentation using a SNIC approach based on the dataset previosly generated
+var seeds = ee.Algorithms.Image.Segmentation.seedGrid(size_segmentation);
+var snic = ee.Algorithms.Image.Segmentation.SNIC({
+  image: dataset, 
+  compactness: 0,  
+  connectivity: 8, 
+  neighborhoodSize: 32, 
+  seeds: seeds
+})
+print("snic",snic)
+// //--------please segment results------------//
+// Export.image.toDrive({
+//   image: snic.select("clusters"),
+//   folder: "CA",
+//   fileNamePrefix: "CA_S2",
+//   scale: 30,
+//   region:roi2,
+//   maxPixels:1e13
+//   });
+
+var final_bands = snic
+//Define the training bands removing just the "clusters" bands
+var predictionBands=final_bands.bandNames().remove("clusters")
+print("predictionBands", predictionBands)

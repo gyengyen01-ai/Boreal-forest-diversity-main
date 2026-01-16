@@ -1,0 +1,461 @@
+// Use this function to remove clouds in Landsat-8
+function maskl8clouds(image){
+  var DilatedCloudBitMask = 1 << 1;
+  var cirrusBitMask = 1 << 2;
+  var cloudBitMask = 1 << 3;
+  var cloudShadowBitMask = 1 << 4;
+  var sowBitmask = 1 << 5;
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(DilatedCloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0))
+      .and(qa.bitwiseAnd(cloudBitMask).eq(0))
+      .and(qa.bitwiseAnd(cloudShadowBitMask).eq(0))
+      .and(qa.bitwiseAnd(sowBitmask).eq(0));
+  return image.updateMask(mask).divide(10000).clip(roi)
+      .copyProperties(image, ["system:time_start"]);
+}
+// Use this function to add vegetation indices
+function addVariables(image) {
+   return image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])
+    // Add an NDVI band.
+    .addBands(image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI'))
+    // Add an NDWI band.
+    .addBands(image.normalizedDifference(['SR_B5', 'SR_B7']).rename('NDWI'))
+    // Add an mNDWI band.
+    .addBands(image.normalizedDifference(['SR_B3', 'SR_B6']).rename('mNDWI'))
+    // Add an RVI band.
+    .addBands(image.expression(
+      'NIR*RED / GREEN', {
+      'NIR': image.select('SR_B5'),
+      'RED': image.select('SR_B4'),
+      'GREEN': image.select('SR_B2'),
+    }).rename('CVI'))
+    // Add an BSI band.
+    .addBands(image.expression(
+      '((RED + SWIR) - (NIR + BLUE)) / ((RED + SWIR) + (NIR + BLUE))', {
+        'RED': image.select('SR_B4'), 
+        'BLUE': image.select('SR_B2'),
+        'NIR': image.select('SR_B5'),
+        'SWIR': image.select('SR_B6')}).rename('BSI'))
+    .addBands(image.expression(
+      '((NIR - RED) / (NIR + RED + 0.5)) *1.5', {
+        'RED': image.select('SR_B4'), 
+        'NIR': image.select('SR_B5')}).rename('SAVI'))
+    .float();
+}
+
+//************************************************
+var date_start = ee.Date('2020-05-01');
+var date_end= ee.Date('2020-10-31');
+
+//center Map
+Map.centerObject(roi, 5);     
+
+var dataset = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                  .filterDate(date_start.advance(-2,'year'),date_end)
+                  .filterBounds(roi)
+                  .map(maskl8clouds)
+                  .map(addVariables);
+                  
+var band_median = dataset.select('NDVI', 'NDWI', 'mNDWI', 'CVI', 'BSI', 'SAVI');
+var image = band_median.map(function(img){ 
+                    return img.clip(roi)});
+
+//create list of months from 1 to 12
+var months = ee.List.sequence(1, 12);
+//separate by years
+var years = ee.List.sequence(date_start.advance(-2,"year")
+                                      .get("year"),
+                            date_end.get("year"));
+//compute median value per month
+var composite = years.map(function (y) {
+    return ee.ImageCollection.fromImages(months.map(function (m) {
+      return image.filter(ee.Filter.calendarRange(y,y,'year'))
+                      .filter(ee.Filter.calendarRange(m,m,'month'))
+                      .median()
+                      .set('month',m, 'year',y);
+    }));
+  });
+
+//decompose list of img collection into list of images
+function decomposeList(l) {
+  return ee.ImageCollection(l).toList(12);
+}
+var list_imgs = composite.map(decomposeList).flatten();
+//set system id and system index according to year and month
+function renameImages(img1) {
+  var img = ee.Image(img1);
+  var value = ee.Number(img.get('year')).format('%04d')
+          .cat('_').cat(ee.Number(img.get('month')).format('%02d'));
+  return ee.Image(img.set('system:index', value, 'system:id',value));
+}
+var list_imgs_renamed = list_imgs.map(renameImages);
+//convert from list to img collection
+var decomposed_collection = ee.ImageCollection(list_imgs_renamed);
+
+
+//set image dates in milliseconds
+function setTime(img) {
+  return img.set('system:time_start', ee.Date.fromYMD(
+                  img.get('year'),img.get('month'),01).millis());
+}
+//set number of bands
+function addNumBands(img){
+  return img.set('num_bands', img.bandNames().length());
+}
+//add time band to image
+function addTime(img) {
+  var time = ee.Image(img.date().millis()).rename('t').float();
+  return img.addBands(time);
+}
+//add constant band
+function addConstant(img) {
+  return img.addBands(ee.Image.constant(1));
+}
+//apply functions
+var decomposed_collection =  decomposed_collection.map(addNumBands)
+                                                  .filter('num_bands > 0')
+                                                  .map(setTime)
+                                                  .map(addConstant)
+                                                  .map(addTime);
+
+print(decomposed_collection,'decomposed_collection');
+
+// define the dependent variable to be modeled.
+var dependent = 'NDVI';
+// define the number of cycles per year to model.
+var harmonics = 3;
+// make a list of harmonic frequencies to model,  
+// which also serve as band name suffixes.
+var harmonicFrequencies = ee.List.sequence(1, harmonics);
+// get a sequence of band names for harmonic terms.
+var getNames = function(base, list) {
+  return ee.List(list).map(function(i) { 
+    return ee.String(base).cat(ee.Number(i).int());
+  });
+};
+// create lists of names for the harmonic terms.
+var cosNames = getNames('cos_', harmonicFrequencies);
+var sinNames = getNames('sin_', harmonicFrequencies);
+// define independent variables.
+var independents = ee.List(['constant', 't'])
+                            .cat(cosNames).cat(sinNames);
+// compute the specified number of harmonics
+// and add them as bands. Assumes the time band is present.
+var addHarmonics = function(freqs) {
+  return function(image) {
+    // make an image of frequencies
+    var frequencies = ee.Image.constant(freqs);
+    // this band should represent time in radians.
+    var PI2 = 2.0 * Math.PI;
+    var time = ee.Image(image).select('t').multiply( PI2 / (1000 * 60 * 60 * 24 * 365.25));
+    // get the cosine terms.
+    var cosines = time.multiply(frequencies).cos().rename(cosNames); 
+    // get the sin terms.
+    var sines = time.multiply(frequencies).sin().rename(sinNames);
+    return image.addBands(cosines).addBands(sines);
+  };
+};
+// Add variables.
+var harmonicSentinel = decomposed_collection.map(
+                                addHarmonics(harmonicFrequencies));
+                                
+
+// fit model to time-series using linear regression reducer
+var harmonicTrend = harmonicSentinel
+  .select(independents.add(dependent))
+  .reduce(ee.Reducer.linearRegression({
+        numX: independents.length(),
+        numY: 1}));
+// turn the array image into a multi-band image of coefficients.
+var harmonicTrendCoefficients = harmonicTrend.select('coefficients')
+  .arrayProject([0])
+  .arrayFlatten([independents]);
+// compute fitted values.
+var fittedHarmonic = harmonicSentinel.map(function(image) {
+  return image.addBands(image.select(independents)
+        .multiply(harmonicTrendCoefficients)
+        .reduce('sum')
+        .rename('fitted'));
+});
+
+print(fittedHarmonic,'fittedHarmonic');
+
+//get original composite values
+var original_image = decomposed_collection.select('NDVI', 'NDWI', 'mNDWI', 'CVI', 'BSI', 'SAVI');
+//get fitted ndvi values
+var fitted_image = fittedHarmonic.select('fitted');
+//combine bands
+var combined = original_image.combine(fitted_image);
+//fill gaps in original with fitted values
+var gap_filled_composite = combined.map(function(img){
+            return img.select('NDVI', 'NDWI', 'mNDWI', 'CVI', 'BSI', 'SAVI').unmask(img.select('fitted'));
+});
+//filter by date
+var gap_filled_composite = gap_filled_composite
+                                .filterDate(date_start, date_end);
+print(gap_filled_composite);
+
+// (OPTIONAL PART)
+var singleBand = gap_filled_composite.toBands();
+print(singleBand,'singleBand');
+
+//add august composite to map
+Map.addLayer(singleBand,{bands: '2020_08_NDVI', min: 0, max: 3,
+                        palette: ['green','white', 'red']}, 'B4 august');
+
+var bands = singleBand.bandNames();
+print("bands", bands);
+
+var training = singleBand.select(bands).sampleRegions({
+  collection: training,
+  //properties: ['bindex_lts'],
+  scale: 50,
+  geometries: true
+});
+
+// Transform coordinates into properties in the table.
+var featColExport = training.map(function (feature) {
+  // Get geometry
+  var coordinates = feature.geometry()
+                          // Transform it to the desired EPSG code. Here WGS 84
+                          .transform('epsg:4326')
+                          // Get coordinates as a list
+                          .coordinates();
+  // Get both entries of coordinates and set them as new properties
+  var resul = feature.set('lon', coordinates.get(0), 
+                    'lat', coordinates.get(1));
+  // Remove geometry                   
+  return resul.setGeometry(null);
+});
+
+
+
+
+// Use this function to remove clouds in Landsat-8
+function maskl8clouds(image){
+  var DilatedCloudBitMask = 1 << 1;
+  var cirrusBitMask = 1 << 2;
+  var cloudBitMask = 1 << 3;
+  var cloudShadowBitMask = 1 << 4;
+  var sowBitmask = 1 << 5;
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(DilatedCloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0))
+      .and(qa.bitwiseAnd(cloudBitMask).eq(0))
+      .and(qa.bitwiseAnd(cloudShadowBitMask).eq(0))
+      .and(qa.bitwiseAnd(sowBitmask).eq(0));
+  return image.updateMask(mask).divide(10000).clip(roi)
+      .copyProperties(image, ["system:time_start"]);
+}
+// Use this function to add vegetation indices
+function addVariables(image) {
+   return image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])
+    // Add an NDVI band.
+    .addBands(image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI'))
+    // Add an NDWI band.
+    .addBands(image.normalizedDifference(['SR_B5', 'SR_B7']).rename('NDWI'))
+    // Add an mNDWI band.
+    .addBands(image.normalizedDifference(['SR_B3', 'SR_B6']).rename('mNDWI'))
+    // Add an RVI band.
+    .addBands(image.expression(
+      'NIR / RED', {
+      'NIR': image.select('SR_B5'),
+      'RED': image.select('SR_B4'),
+    }).rename('RVI'))
+    // Add an IRECI band.
+    .addBands(image.expression(
+      '((RED + SWIR) - (NIR + BLUE)) / ((RED + SWIR) + (NIR + BLUE))', {
+        'RED': image.select('SR_B4'), 
+        'BLUE': image.select('SR_B2'),
+        'NIR': image.select('SR_B5'),
+        'SWIR': image.select('SR_B6')}).rename('BSI'))
+    .float();
+}
+
+//************************************************
+var date_start = ee.Date('2020-05-01');
+var date_end= ee.Date('2020-10-31');
+
+//center Map
+Map.centerObject(roi, 5);     
+
+var dataset = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                  .filterDate(date_start.advance(-2,'year'),date_end)
+                  .filterBounds(roi)
+                  .map(maskl8clouds)
+                  .map(addVariables);
+                  
+var band_median = dataset.select('SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7');
+var image = band_median.map(function(img){ 
+                    return img.clip(roi)});
+
+//create list of months from 1 to 12
+var months = ee.List.sequence(1, 12);
+//separate by years
+var years = ee.List.sequence(date_start.advance(-2,"year")
+                                      .get("year"),
+                            date_end.get("year"));
+//compute median value per month
+var composite = years.map(function (y) {
+    return ee.ImageCollection.fromImages(months.map(function (m) {
+      return image.filter(ee.Filter.calendarRange(y,y,'year'))
+                      .filter(ee.Filter.calendarRange(m,m,'month'))
+                      .median()
+                      .set('month',m, 'year',y);
+    }));
+  });
+
+//decompose list of img collection into list of images
+function decomposeList(l) {
+  return ee.ImageCollection(l).toList(12);
+}
+var list_imgs = composite.map(decomposeList).flatten();
+//set system id and system index according to year and month
+function renameImages(img1) {
+  var img = ee.Image(img1);
+  var value = ee.Number(img.get('year')).format('%04d')
+          .cat('_').cat(ee.Number(img.get('month')).format('%02d'));
+  return ee.Image(img.set('system:index', value, 'system:id',value));
+}
+var list_imgs_renamed = list_imgs.map(renameImages);
+//convert from list to img collection
+var decomposed_collection = ee.ImageCollection(list_imgs_renamed);
+
+
+//set image dates in milliseconds
+function setTime(img) {
+  return img.set('system:time_start', ee.Date.fromYMD(
+                  img.get('year'),img.get('month'),01).millis());
+}
+//set number of bands
+function addNumBands(img){
+  return img.set('num_bands', img.bandNames().length());
+}
+//add time band to image
+function addTime(img) {
+  var time = ee.Image(img.date().millis()).rename('t').float();
+  return img.addBands(time);
+}
+//add constant band
+function addConstant(img) {
+  return img.addBands(ee.Image.constant(1));
+}
+//apply functions
+var decomposed_collection =  decomposed_collection.map(addNumBands)
+                                                  .filter('num_bands > 0')
+                                                  .map(setTime)
+                                                  .map(addConstant)
+                                                  .map(addTime);
+
+print(decomposed_collection,'decomposed_collection');
+
+// define the dependent variable to be modeled.
+var dependent = 'SR_B5';
+// define the number of cycles per year to model.
+var harmonics = 3;
+// make a list of harmonic frequencies to model,  
+// which also serve as band name suffixes.
+var harmonicFrequencies = ee.List.sequence(1, harmonics);
+// get a sequence of band names for harmonic terms.
+var getNames = function(base, list) {
+  return ee.List(list).map(function(i) { 
+    return ee.String(base).cat(ee.Number(i).int());
+  });
+};
+// create lists of names for the harmonic terms.
+var cosNames = getNames('cos_', harmonicFrequencies);
+var sinNames = getNames('sin_', harmonicFrequencies);
+// define independent variables.
+var independents = ee.List(['constant', 't'])
+                            .cat(cosNames).cat(sinNames);
+// compute the specified number of harmonics
+// and add them as bands. Assumes the time band is present.
+var addHarmonics = function(freqs) {
+  return function(image) {
+    // make an image of frequencies
+    var frequencies = ee.Image.constant(freqs);
+    // this band should represent time in radians.
+    var PI2 = 2.0 * Math.PI;
+    var time = ee.Image(image).select('t').multiply( PI2 / (1000 * 60 * 60 * 24 * 365.25));
+    // get the cosine terms.
+    var cosines = time.multiply(frequencies).cos().rename(cosNames); 
+    // get the sin terms.
+    var sines = time.multiply(frequencies).sin().rename(sinNames);
+    return image.addBands(cosines).addBands(sines);
+  };
+};
+// Add variables.
+var harmonicSentinel = decomposed_collection.map(
+                                addHarmonics(harmonicFrequencies));
+                                
+
+// fit model to time-series using linear regression reducer
+var harmonicTrend = harmonicSentinel
+  .select(independents.add(dependent))
+  .reduce(ee.Reducer.linearRegression({
+        numX: independents.length(),
+        numY: 1}));
+// turn the array image into a multi-band image of coefficients.
+var harmonicTrendCoefficients = harmonicTrend.select('coefficients')
+  .arrayProject([0])
+  .arrayFlatten([independents]);
+// compute fitted values.
+var fittedHarmonic = harmonicSentinel.map(function(image) {
+  return image.addBands(image.select(independents)
+        .multiply(harmonicTrendCoefficients)
+        .reduce('sum')
+        .rename('fitted'));
+});
+
+print(fittedHarmonic,'fittedHarmonic');
+
+//get original composite values
+var original_image = decomposed_collection.select('SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7');
+//get fitted ndvi values
+var fitted_image = fittedHarmonic.select('fitted');
+//combine bands
+var combined = original_image.combine(fitted_image);
+//fill gaps in original with fitted values
+var gap_filled_composite = combined.map(function(img){
+            return img.select('SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7').unmask(img.select('fitted'));
+});
+//filter by date
+var gap_filled_composite = gap_filled_composite
+                                .filterDate(date_start, date_end);
+print(gap_filled_composite);
+
+// (OPTIONAL PART)
+var singleBand = gap_filled_composite.toBands();
+print(singleBand,'singleBand');
+
+//add august composite to map
+Map.addLayer(singleBand,{bands: '2020_08_SR_B5', min: 0, max: 3,
+                        palette: ['green','white', 'red']}, 'B4 august');
+
+var bands = singleBand.bandNames();
+print("bands", bands);
+
+var training = singleBand.select(bands).sampleRegions({
+  collection: training,
+  //properties: ['bindex_lts'],
+  scale: 50,
+  geometries: true
+});
+
+// Transform coordinates into properties in the table.
+var featColExport = training.map(function (feature) {
+  // Get geometry
+  var coordinates = feature.geometry()
+                          // Transform it to the desired EPSG code. Here WGS 84
+                          .transform('epsg:4326')
+                          // Get coordinates as a list
+                          .coordinates();
+  // Get both entries of coordinates and set them as new properties
+  var resul = feature.set('lon', coordinates.get(0), 
+                    'lat', coordinates.get(1));
+  // Remove geometry                   
+  return resul.setGeometry(null);
+});
+
+
